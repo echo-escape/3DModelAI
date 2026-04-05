@@ -30,8 +30,9 @@ export async function POST(req: NextRequest) {
     
     return NextResponse.json(response);
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Query Job Error:", error);
-    return NextResponse.json({ error: error.message || "Unknown error" }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

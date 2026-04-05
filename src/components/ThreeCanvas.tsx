@@ -35,14 +35,17 @@ export default function ThreeCanvas({ scene, placeholder = false }: Props) {
     controls.enableDamping = true;
 
     // 4. 初始化灯光
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
     threeScene.add(ambientLight);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(5, 5, 5);
     threeScene.add(directionalLight);
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    backLight.position.set(-5, -5, -5);
+    threeScene.add(backLight);
 
     // 5. 处理模型
-    let model: THREE.Object3D;
+    let model: THREE.Object3D | null = null;
     
     if (scene) {
       model = scene.clone();
@@ -52,23 +55,37 @@ export default function ThreeCanvas({ scene, placeholder = false }: Props) {
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = 1.0 / maxDim;
+      const scale = maxDim > 0 ? 1.0 / maxDim : 1.0;
       
       model.scale.setScalar(scale);
       model.position.sub(center.multiplyScalar(scale));
       
-      // 赋予基础材质（如果是白模）
+      // 遍历模型优化材质
       model.traverse((child) => {
         if (child instanceof THREE.Mesh) {
-          if (!child.material || (child.material as any).color?.getHex() === 0x000000) {
-            child.material = new THREE.MeshStandardMaterial({ 
-              color: 0xcccccc, 
-              roughness: 0.5, 
-              metalness: 0.2 
-            });
+          const geometry = child.geometry;
+          const hasVertexColors = geometry.attributes.color !== undefined;
+          const mat = child.material;
+          
+          if (hasVertexColors) {
+            // 顶点色支持
+            if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshBasicMaterial) {
+              mat.vertexColors = true;
+              if (!mat.map) mat.color.set(0xffffff); // 仅在无贴图时设为白色以配合顶点色
+            }
+          }
+          
+          // 如果是标准材质但全黑且无贴图，给予兜底色
+          if (mat instanceof THREE.MeshStandardMaterial) {
+            if (mat.color.getHex() === 0x000000 && !mat.map && !hasVertexColors) {
+              mat.color.set(0xcccccc);
+            }
+            mat.roughness = Math.max(mat.roughness, 0.3); // 避免太反光
           }
         }
       });
+      
+      threeScene.add(model);
     } else {
       // 默认占位模型: 玻璃感圆角立方体
       const geometry = new THREE.IcosahedronGeometry(0.5, 0);
@@ -79,17 +96,17 @@ export default function ThreeCanvas({ scene, placeholder = false }: Props) {
         transmission: 0.5,
         thickness: 0.5,
       });
-      model = new THREE.Mesh(geometry, material);
+      const placeholderModel = new THREE.Mesh(geometry, material);
       
       // 添加一个线框外框
       const wireframe = new THREE.Mesh(
         geometry,
         new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.2 })
       );
-      model.add(wireframe);
+      placeholderModel.add(wireframe);
+      threeScene.add(placeholderModel);
+      model = placeholderModel;
     }
-
-    threeScene.add(model);
 
     // 6. 渲染循环
     let frameId: number;
@@ -97,7 +114,6 @@ export default function ThreeCanvas({ scene, placeholder = false }: Props) {
       frameId = requestAnimationFrame(animate);
       if (model) {
         model.rotation.y += 0.005; 
-        model.rotation.x += 0.002;
       }
       controls.update();
       renderer.render(threeScene, camera);
@@ -105,11 +121,12 @@ export default function ThreeCanvas({ scene, placeholder = false }: Props) {
     animate();
 
     // 7. 清理
+    const container = containerRef.current;
     return () => {
       cancelAnimationFrame(frameId);
       renderer.dispose();
-      if (containerRef.current) {
-        containerRef.current.removeChild(renderer.domElement);
+      if (container) {
+        container.removeChild(renderer.domElement);
       }
     };
   }, [scene, placeholder]);

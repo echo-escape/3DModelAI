@@ -5,7 +5,7 @@ const Ai3DClient = tencentcloud.ai3d.v20250513.Client;
 
 export async function POST(req: NextRequest) {
   try {
-    const { action, prompt, imageUrl } = await req.json();
+    const { action, prompt, imageUrl, generateType, enablePBR } = await req.json();
     const secretId = req.headers.get("x-secret-id");
     const secretKey = req.headers.get("x-secret-key");
 
@@ -28,10 +28,20 @@ export async function POST(req: NextRequest) {
 
     const client = new Ai3DClient(clientConfig);
 
-    let params: any = {
-      // 默认使用 LowPoly 以获得更好的拓扑结构，适合 3D 打印
-      GenerateType: "LowPoly",
-      Model: "3.0"
+    interface SubmitParams {
+      GenerateType: string;
+      Model: string;
+      EnablePBR: boolean;
+      ResultFormat: string;
+      Prompt?: string;
+      ImageBase64?: string;
+    }
+
+    const params: SubmitParams = {
+      GenerateType: generateType || "LowPoly",
+      Model: "3.0",
+      EnablePBR: enablePBR !== undefined ? enablePBR : true,
+      ResultFormat: "GLB"
     };
 
     if (action === "text-to-3d") {
@@ -47,11 +57,12 @@ export async function POST(req: NextRequest) {
     const response = await client.SubmitHunyuanTo3DProJob(params);
     return NextResponse.json(response);
 
-  } catch (error: any) {
-    console.error("Submit Job Error:", error);
+  } catch (error: unknown) {
+    const err = error as Error & { code?: string };
+    console.error("Submit Job Error:", err);
     return NextResponse.json({ 
-      error: error.message || "Unknown error",
-      code: error.code
+      error: err.message || "Unknown error",
+      code: err.code
     }, { status: 500 });
   }
 }

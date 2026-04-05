@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Settings, Image as ImageIcon, Type, Send, Download, Loader2, AlertCircle, History, Trash2, FileCode, Printer, CheckCircle2 } from "lucide-react";
-import { downloadAsSTL, loadModelWithFormat, convertSceneToGLB } from "@/utils/three-utils";
+import { Settings, Image as ImageIcon, Send, Download, Loader2, AlertCircle, History, Trash2, Printer, CheckCircle2, Plus, FileCode, HelpCircle } from "lucide-react";
+import { downloadAsSTL, loadModelWithFormat } from "@/utils/three-utils";
+import { translations, Language } from "@/utils/i18n";
 import ThreeCanvas from "@/components/ThreeCanvas";
 import * as THREE from "three";
 
@@ -18,7 +19,8 @@ interface HistoryItem {
   timestamp: number;
   status: JobStatus;
   resultUrl?: string;
-  useTopology: boolean;
+  generateType?: string;
+  enablePBR?: boolean;
 }
 
 export default function Home() {
@@ -29,21 +31,37 @@ export default function Home() {
   const [mode, setMode] = useState<"text" | "image">("text");
   const [prompt, setPrompt] = useState("");
   const [imageUrl, setImageUrl] = useState(""); 
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [useTopology, setUseTopology] = useState(true);
+  
+  const [generateType, setGenerateType] = useState<"Normal" | "LowPoly">("LowPoly");
+  const [enablePBR, setEnablePBR] = useState(true);
 
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [currentStatus, setCurrentStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resultModelUrl, setResultModelUrl] = useState<string | null>(null);
   
-  const [objScene, setObjScene] = useState<THREE.Group | null>(null);
-  const [glbProxyUrl, setGlbProxyUrl] = useState<string | null>(null);
+  const [modelScene, setModelScene] = useState<THREE.Group | null>(null);
   const [realFormat, setRealFormat] = useState<string>("glb");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExportingSTL, setIsExportingSTL] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [lang, setLang] = useState<Language>("zh");
   const [showHistory, setShowHistory] = useState(false);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [isViewingHistory, setIsViewingHistory] = useState(false);
+
+  const t = translations[lang];
+
+  const resetSession = () => {
+    setPrompt("");
+    setImageUrl("");
+    setActiveJobId(null);
+    setCurrentStatus(null);
+    setError(null);
+    setResultModelUrl(null);
+    setModelScene(null);
+    setIsViewingHistory(false);
+  };
 
   useEffect(() => {
     const savedId = localStorage.getItem("TENCENT_SECRET_ID");
@@ -73,25 +91,25 @@ export default function Home() {
   useEffect(() => {
     const loadPreview = async () => {
       if (resultModelUrl) {
-        setObjScene(null);
-        setGlbProxyUrl(null);
+        setModelScene(null);
         setError(null);
+        setIsPreviewLoading(true);
         try {
           const proxyUrl = `/api/proxy-model?url=${encodeURIComponent(resultModelUrl)}`;
+          console.log("Loading preview from proxy:", proxyUrl);
+          
           const { scene, format } = await loadModelWithFormat(proxyUrl);
           setRealFormat(format);
-          if (format === "glb") {
-            setGlbProxyUrl(proxyUrl);
-          } else {
-            setObjScene(scene);
-          }
-        } catch (err: any) {
-          setError("Preview error: " + err.message);
+          setModelScene(scene);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Preview load failed:", msg);
+          setError("Preview failed: " + msg);
         } finally {
+          setIsPreviewLoading(false);
         }
       } else {
-        setObjScene(null);
-        setGlbProxyUrl(null);
+        setModelScene(null);
       }
     };
     loadPreview();
@@ -109,7 +127,17 @@ export default function Home() {
       const newStatus = data.Status as JobStatus;
       setCurrentStatus(newStatus);
       if (newStatus === "DONE") {
-        const modelUrl = data.ResultFile3Ds?.[0]?.Url;
+        const files = (data.ResultFile3Ds || []) as { Type: string; Url: string }[];
+        // 智能寻找主模型文件：严格优先 GLB > OBJ > STL
+        const mainModel = files.find((f) => f.Type.toUpperCase() === "GLB")
+                        || files.find((f) => f.Type.toUpperCase() === "OBJ")
+                        || files.find((f) => f.Type.toUpperCase() === "STL")
+                        || files.find((f) => f.Url.match(/\.glb$/i))
+                        || files.find((f) => f.Url.match(/\.obj$/i))
+                        || files.find((f) => f.Url.match(/\.stl$/i))
+                        || files[0]; // 兜底
+
+        const modelUrl = mainModel?.Url;
         setResultModelUrl(modelUrl);
         setActiveJobId(null);
         updateHistory({ jobId: id, status: "DONE", resultUrl: modelUrl });
@@ -118,8 +146,9 @@ export default function Home() {
         setActiveJobId(null);
         updateHistory({ jobId: id, status: "FAIL" });
       }
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      const error = err as Error;
+      setError(error.message);
       setActiveJobId(null);
     }
   }, [secretId, secretKey, updateHistory]);
@@ -139,7 +168,7 @@ export default function Home() {
     setResultModelUrl(null);
     setCurrentStatus("WAIT");
     try {
-      const body = { action: mode === "text" ? "text-to-3d" : "image-to-3d", prompt, imageUrl, useTopology };
+      const body = { action: mode === "text" ? "text-to-3d" : "image-to-3d", prompt, imageUrl, generateType, enablePBR };
       const res = await fetch("/api/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-secret-id": secretId, "x-secret-key": secretKey },
@@ -148,9 +177,10 @@ export default function Home() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       setActiveJobId(data.JobId);
-      updateHistory({ jobId: data.JobId, prompt: mode === "text" ? prompt : "Image Task", timestamp: Date.now(), status: "WAIT", useTopology });
-    } catch (err: any) {
-      setError(err.message);
+      updateHistory({ jobId: data.JobId, prompt: mode === "text" ? prompt : "Image Task", timestamp: Date.now(), status: "WAIT", generateType, enablePBR });
+    } catch (err: unknown) {
+      const error = err as Error;
+      setError(error.message);
       setCurrentStatus(null);
     } finally { setIsSubmitting(false); }
   };
@@ -160,7 +190,10 @@ export default function Home() {
     setIsExportingSTL(true);
     try {
       await downloadAsSTL(`/api/proxy-model?url=${encodeURIComponent(resultModelUrl)}`, `model_${Date.now()}`);
-    } catch (err: any) { alert("STL Error: " + err.message); }
+    } catch (err: unknown) { 
+      const error = err as Error;
+      alert("STL Error: " + error.message); 
+    }
     finally { setIsExportingSTL(false); }
   };
 
@@ -169,6 +202,7 @@ export default function Home() {
     setActiveJobId(item.jobId);
     setCurrentStatus(item.status);
     setResultModelUrl(item.resultUrl || null);
+    setIsViewingHistory(true);
   };
 
   return (
@@ -186,7 +220,7 @@ export default function Home() {
         <div className="flex justify-between items-center mb-8">
           <div className="flex items-center gap-2">
             <div className="p-2 bg-purple-100 rounded-xl"><History className="w-5 h-5 text-purple-400" /></div>
-            <h2 className="text-lg font-black text-slate-800 tracking-tight">History</h2>
+            <h2 className="text-lg font-black text-slate-800 tracking-tight">{t.history}</h2>
           </div>
           <button onClick={() => { localStorage.removeItem("3D_MODEL_HISTORY"); setHistory([]); }} className="text-slate-300 hover:text-red-400 transition-colors"><Trash2 className="w-4 h-4" /></button>
         </div>
@@ -208,7 +242,7 @@ export default function Home() {
           {history.length === 0 && (
             <div className="text-center py-10 opacity-30">
               <History className="w-10 h-10 mx-auto mb-2" />
-              <p className="text-xs font-bold uppercase tracking-widest">No tasks</p>
+              <p className="text-xs font-bold uppercase tracking-widest">{t.noTasks}</p>
             </div>
           )}
         </div>
@@ -242,6 +276,16 @@ export default function Home() {
             </h1>
           </div>
           <div className="flex gap-3">
+            <button 
+              onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+              className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-white/80 shadow-sm border border-white text-slate-500 hover:bg-white transition-all font-black text-[10px] uppercase tracking-widest"
+            >
+              {lang === "zh" ? "EN" : "中文"}
+            </button>
+            <button onClick={resetSession} className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-white/80 shadow-sm border border-white text-slate-500 hover:bg-white transition-all group">
+              <Plus className="w-4 h-4 group-hover:rotate-90 transition-transform duration-300" />
+              <span className="text-[10px] font-black uppercase tracking-widest hidden sm:inline">{t.newSession}</span>
+            </button>
             <button onClick={() => setShowHistory(!showHistory)} className="md:hidden p-3 rounded-2xl bg-white/80 shadow-sm border border-white text-slate-500 hover:bg-white transition-all"><History className="w-5 h-5" /></button>
             <button onClick={() => setShowSettings(true)} className="p-3 rounded-2xl bg-white/80 shadow-sm border border-white text-slate-500 hover:bg-white transition-all"><Settings className="w-5 h-5" /></button>
           </div>
@@ -252,43 +296,111 @@ export default function Home() {
           <div className="lg:col-span-5 space-y-6">
             <div className="bg-white/60 backdrop-blur-md border border-white/80 rounded-[2.5rem] p-8 shadow-xl shadow-blue-50/50 h-fit">
               <div className="flex gap-2 mb-6 bg-slate-100/50 p-1.5 rounded-2xl border border-slate-100">
-                <button onClick={() => setMode("text")} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === "text" ? "bg-white shadow-sm text-[#FFB7B2]" : "text-slate-400 hover:text-slate-600"}`}>TEXT</button>
-                <button onClick={() => setMode("image")} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === "image" ? "bg-white shadow-sm text-[#FFB7B2]" : "text-slate-400 hover:text-slate-600"}`}>IMAGE</button>
+                <button onClick={() => setMode("text")} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === "text" ? "bg-white shadow-sm text-[#FFB7B2]" : "text-slate-400 hover:text-slate-600"}`}>{t.textMode}</button>
+                <button onClick={() => setMode("image")} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === "image" ? "bg-white shadow-sm text-[#FFB7B2]" : "text-slate-400 hover:text-slate-600"}`}>{t.imageMode}</button>
               </div>
 
               {mode === "text" ? (
                 <textarea 
                   value={prompt} onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Describe your model..."
+                  placeholder={t.promptPlaceholder}
                   className="w-full h-40 bg-white/40 border border-slate-100 rounded-2xl p-5 outline-none focus:ring-4 focus:ring-pink-50 transition-all text-slate-600 placeholder:text-slate-300 resize-none text-sm font-medium"
                 />
               ) : (
-                <div className="relative group border-2 border-dashed border-slate-200 rounded-[2rem] h-40 flex flex-col items-center justify-center bg-white/20 hover:bg-white/40 transition-all">
-                  <input type="file" onChange={(e) => { const file = e.target.files?.[0]; if (file) { setImageFile(file); const reader = new FileReader(); reader.onloadend = () => setImageUrl(reader.result as string); reader.readAsDataURL(file); } }} accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer z-10" />
-                  <div className="p-3 bg-blue-50 rounded-xl mb-2"><ImageIcon className="w-6 h-6 text-blue-300" /></div>
-                  <p className="text-slate-400 font-black text-[10px] uppercase tracking-widest">{imageFile ? imageFile.name : "Select Image"}</p>
+                <div className="relative group border-2 border-dashed border-slate-200 rounded-[2rem] h-40 flex flex-col items-center justify-center bg-white/20 hover:bg-white/40 transition-all overflow-hidden">
+                  <input type="file" onChange={(e) => { const file = e.target.files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setImageUrl(reader.result as string); reader.readAsDataURL(file); } }} accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer z-20" />
+                  {imageUrl ? (
+                    <div className="absolute inset-0 z-10 p-4">
+                      <div className="relative w-full h-full rounded-[1.5rem] overflow-hidden group/preview flex items-center justify-center bg-slate-50/50">
+                        <img src={imageUrl} alt="Preview" className="max-w-full max-h-full object-contain transition-transform duration-500 group-hover/preview:scale-105" />
+                        <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover/preview:opacity-100 transition-opacity flex items-center justify-center">
+                          <p className="text-[10px] font-black text-white uppercase tracking-widest">{t.changeImage}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="p-3 bg-blue-50 rounded-xl mb-2"><ImageIcon className="w-6 h-6 text-blue-300" /></div>
+                      <p className="text-slate-400 font-black text-[10px] uppercase tracking-widest">{t.selectImage}</p>
+                    </>
+                  )}
                 </div>
               )}
 
-              <div className="mt-6 flex items-center justify-between p-4 bg-[#B2E2F2]/20 rounded-2xl border border-[#B2E2F2]/30 cursor-pointer transition-all hover:bg-[#B2E2F2]/30" onClick={() => setUseTopology(!useTopology)}>
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-white rounded-lg shadow-sm text-[#B2E2F2]"><Printer className="w-4 h-4" /></div>
-                  <div>
-                    <p className="text-xs font-black text-slate-700 uppercase leading-none mb-1">Print Optimize</p>
-                    <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Smart Topology Mode</p>
+              {/* Generation Options */}
+              <div className="mt-6 space-y-3">
+                {isViewingHistory && (
+                  <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-start gap-3 animate-in fade-in zoom-in duration-300">
+                    <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                    <p className="text-[10px] font-bold text-amber-600 leading-relaxed">
+                      {t.historyAlert}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between p-4 bg-[#B2E2F2]/10 rounded-2xl border border-[#B2E2F2]/30 cursor-pointer transition-all hover:bg-[#B2E2F2]/20" onClick={() => !isViewingHistory && setGenerateType(generateType === "LowPoly" ? "Normal" : "LowPoly")}>
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-lg shadow-sm text-[#B2E2F2]"><Printer className="w-4 h-4" /></div>
+                    <div>
+                      <p className="text-xs font-black text-slate-700 uppercase leading-none mb-1">{t.topology}</p>
+                      <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">{generateType === "LowPoly" ? t.lowPoly : t.normal}</p>
+                    </div>
+                  </div>
+                  <div className={`w-10 h-6 rounded-full transition-all relative ${generateType === "LowPoly" ? "bg-[#B2E2F2]" : "bg-slate-200"}`}>
+                    <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all duration-300 ${generateType === "LowPoly" ? "translate-x-4" : ""}`} />
                   </div>
                 </div>
-                <div className={`w-10 h-6 rounded-full transition-all relative ${useTopology ? "bg-[#B2E2F2]" : "bg-slate-200"}`}>
-                  <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all duration-300 ${useTopology ? "translate-x-4" : ""}`} />
+
+                <div className="flex items-center justify-between p-4 bg-[#FFB7B2]/10 rounded-2xl border border-[#FFB7B2]/30 cursor-pointer transition-all hover:bg-[#FFB7B2]/20" onClick={() => !isViewingHistory && setEnablePBR(!enablePBR)}>
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-lg shadow-sm text-[#FFB7B2]"><ImageIcon className="w-4 h-4" /></div>
+                    <div>
+                      <p className="text-xs font-black text-slate-700 uppercase leading-none mb-1">{t.material}</p>
+                      <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">{enablePBR ? t.pbrTextures : t.whiteModel}</p>
+                    </div>
+                  </div>
+                  <div className={`w-10 h-6 rounded-full transition-all relative ${enablePBR ? "bg-[#FFB7B2]" : "bg-slate-200"}`}>
+                    <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all duration-300 ${enablePBR ? "translate-x-4" : ""}`} />
+                  </div>
                 </div>
               </div>
 
               <button 
-                onClick={handleSubmit} disabled={isSubmitting || !!activeJobId}
+                onClick={handleSubmit} disabled={isSubmitting || !!activeJobId || isViewingHistory}
                 className="w-full mt-6 bg-gradient-to-r from-[#FFB7B2] to-[#FFD1DC] hover:shadow-lg hover:shadow-pink-100 disabled:from-slate-100 disabled:to-slate-100 disabled:text-slate-300 py-4 rounded-2xl font-black text-white transition-all active:scale-95 flex items-center justify-center gap-2 uppercase text-sm tracking-widest"
               >
-                {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : <><Send className="w-4 h-4" /> Start Build</>}
+                {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : isViewingHistory ? <><History className="w-4 h-4" /> {t.historyMode}</> : <><Send className="w-4 h-4" /> {t.startBuild}</>}
               </button>
+            </div>
+
+            {/* Quick Guide */}
+            <div className="bg-white/40 backdrop-blur-sm border border-white/60 rounded-[2rem] p-6 shadow-sm">
+              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 flex items-center gap-2">
+                <FileCode className="w-3 h-3" /> {t.quickGuide}
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-[11px] font-bold text-slate-600 mb-1">{t.guideKeys}</p>
+                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                    {t.guideKeysDesc.split("Tencent Cloud Console")[0]}
+                    <a href="https://console.cloud.tencent.com/cam/capi" target="_blank" className="text-blue-400 hover:underline">Tencent Cloud Console</a>
+                    {t.guideKeysDesc.split("Tencent Cloud Console")[1]}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold text-slate-600 mb-1">{t.guideOptions}</p>
+                  <ul className="text-[10px] text-slate-400 space-y-1">
+                    <li>• <span className="font-bold">{t.topology}</span>: {t.guideOptionsDesc1}</li>
+                    <li>• <span className="font-bold">{t.material}</span>: {t.guideOptionsDesc2}</li>
+                  </ul>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold text-slate-600 mb-1">{t.guideExport}</p>
+                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                    {t.guideExportDesc}
+                  </p>
+                </div>
+              </div>
             </div>
 
             {(currentStatus || error) && (
@@ -297,7 +409,7 @@ export default function Home() {
                   {error ? <AlertCircle className="w-5 h-5" /> : currentStatus === "DONE" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />}
                 </div>
                 <div className="flex-1">
-                  <p className="text-[9px] font-black uppercase tracking-widest opacity-50 mb-0.5">{error ? "Error" : "Status"}</p>
+                  <p className="text-[9px] font-black uppercase tracking-widest opacity-50 mb-0.5">{error ? t.error : t.status}</p>
                   <p className="text-xs font-black uppercase text-slate-700">{error || currentStatus}</p>
                 </div>
               </div>
@@ -308,16 +420,15 @@ export default function Home() {
           <div className="lg:col-span-7">
             <section className="bg-white/60 backdrop-blur-md border border-white/80 rounded-[3rem] p-4 flex flex-col h-full shadow-2xl relative overflow-hidden min-h-[500px]">
               <div className="flex-1 relative rounded-[2.5rem] overflow-hidden bg-gradient-to-b from-slate-50/50 to-white/20">
-                {glbProxyUrl ? (
-                  // @ts-ignore
-                  <model-viewer src={glbProxyUrl} alt="3D" auto-rotate camera-controls shadow-intensity="1" environment-image="neutral" style={{ width: "100%", height: "100%", position: "absolute" }} />
-                ) : (
-                  <ThreeCanvas scene={objScene} />
-                )}
+                
+                <ThreeCanvas scene={modelScene} />
 
-                {!glbProxyUrl && !objScene && activeJobId && (
+                {(activeJobId || isPreviewLoading) && !modelScene && (
                   <div className="absolute inset-0 z-20 flex flex-col items-center justify-center pointer-events-none">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mt-32 animate-pulse">Calculating Task...</p>
+                    <Loader2 className="w-8 h-8 text-[#FFB7B2] animate-spin mb-4" />
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] animate-pulse">
+                      {isPreviewLoading ? t.loadingPreview : t.calculating}
+                    </p>
                   </div>
                 )}
               </div>
@@ -344,12 +455,12 @@ export default function Home() {
             <div className="flex justify-center mb-6">
               <div className="p-3 bg-pink-50 rounded-full"><Settings className="w-6 h-6 text-pink-300 animate-spin-slow" /></div>
             </div>
-            <h2 className="text-xl font-black mb-6 text-center text-slate-800 uppercase tracking-tighter">Authorization</h2>
+            <h2 className="text-xl font-black mb-6 text-center text-slate-800 uppercase tracking-tighter">{t.auth}</h2>
             <div className="space-y-4">
               <input type="password" value={secretId} onChange={(e) => setSecretId(e.target.value)} placeholder="Tencent SecretId" className="w-full bg-white/50 border border-slate-100 rounded-2xl p-4 outline-none focus:ring-4 focus:ring-blue-50 transition-all text-xs font-bold" />
               <input type="password" value={secretKey} onChange={(e) => setSecretKey(e.target.value)} placeholder="Tencent SecretKey" className="w-full bg-white/50 border border-slate-100 rounded-2xl p-4 outline-none focus:ring-4 focus:ring-blue-50 transition-all text-xs font-bold" />
-              <button onClick={() => { localStorage.setItem("TENCENT_SECRET_ID", secretId); localStorage.setItem("TENCENT_SECRET_KEY", secretKey); setShowSettings(false); }} className="w-full bg-slate-800 hover:bg-slate-900 text-white py-4 rounded-2xl font-black shadow-xl shadow-slate-200 transition-all text-xs tracking-widest uppercase">Connect</button>
-              <button onClick={() => setShowSettings(false)} className="w-full py-2 text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] hover:text-slate-600 transition-colors">Close</button>
+              <button onClick={() => { localStorage.setItem("TENCENT_SECRET_ID", secretId); localStorage.setItem("TENCENT_SECRET_KEY", secretKey); setShowSettings(false); }} className="w-full bg-slate-800 hover:bg-slate-900 text-white py-4 rounded-2xl font-black shadow-xl shadow-slate-200 transition-all text-xs tracking-widest uppercase">{t.connect}</button>
+              <button onClick={() => setShowSettings(false)} className="w-full py-2 text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] hover:text-slate-600 transition-colors">{t.close}</button>
             </div>
           </div>
         </div>
